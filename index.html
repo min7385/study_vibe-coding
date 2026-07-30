@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>할 일 관리</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <h1>할 일 관리</h1>
+  </header>
+
+  <main class="app-main">
+    <section id="calendar-area">
+      <div class="calendar-header">
+        <button id="prev-month-btn" class="month-nav-btn" type="button" aria-label="이전 달">&lt;</button>
+        <h2 id="current-year-month"></h2>
+        <button id="next-month-btn" class="month-nav-btn" type="button" aria-label="다음 달">&gt;</button>
+      </div>
+      <div class="calendar-weekdays" id="calendar-weekdays"></div>
+      <div class="calendar-grid" id="calendar-grid"></div>
+    </section>
+
+    <section id="detail-area">
+      <div id="detail-content"></div>
+    </section>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
