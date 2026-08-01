@@ -12,13 +12,17 @@ body {
 .app-header {
   padding: 20px 32px;
   border-bottom: 1px solid #e0e0e0;
-  background-color: #fff;
+  background-image: url("header.png");
+  background-size: cover;
+  background-position: center;
 }
 
 .app-header h1 {
   margin: 0;
   font-size: 22px;
   font-weight: 600;
+  color: #fff;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
 }
 
 .app-main {
