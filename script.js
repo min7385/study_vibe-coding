@@ -8,19 +8,372 @@ const state = {
   selectedDate: formatDateStr(today.getFullYear(), today.getMonth(), today.getDate()),
   todos: loadTodos(), // { id, title, category, date, memo, completed, createdAt }
   detailForm: { mode: null, editingId: null }, // mode: null | "add" | "edit"
-  categoryFilter: "전체", // "전체" | CATEGORIES 중 하나
+  categoryFilter: "전체", // "전체" | 카테고리 이름 중 하나
 };
 
 const WEEKDAY_LABELS = ["일", "월", "화", "수", "목", "금", "토"];
-const CATEGORIES = ["개인", "자기개발", "교회"];
-const CATEGORY_META = {
-  개인: { slug: "personal" },
-  자기개발: { slug: "growth" },
-  교회: { slug: "church" },
-};
 
-function categorySlug(category) {
-  return CATEGORY_META[category] ? CATEGORY_META[category].slug : "etc";
+// ===== 카테고리 관리 =====
+// { id, name, color } 형태로 저장되며, 기존 todos.category(문자열)와는 별개의 데이터다.
+const CATEGORIES_STORAGE_KEY = "categories";
+
+const CATEGORY_PALETTE = [
+  "#4A90D9",
+  "#5CB85C",
+  "#9B59B6",
+  "#E67E22",
+  "#E74C3C",
+  "#F1C40F",
+  "#1ABC9C",
+  "#34495E",
+  "#EC407A",
+  "#95A5A6",
+];
+
+const DEFAULT_CATEGORIES = [
+  { id: "cat-1", name: "개인", color: "#4A90D9" },
+  { id: "cat-2", name: "자기개발", color: "#5CB85C" },
+  { id: "cat-3", name: "교회", color: "#9B59B6" },
+  { id: "cat-default", name: "미분류", color: "#95A5A6" },
+];
+
+function getCategories() {
+  try {
+    const raw = localStorage.getItem(CATEGORIES_STORAGE_KEY);
+    if (!raw) {
+      saveCategories(DEFAULT_CATEGORIES);
+      return DEFAULT_CATEGORIES;
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      saveCategories(DEFAULT_CATEGORIES);
+      return DEFAULT_CATEGORIES;
+    }
+    return parsed;
+  } catch (error) {
+    console.error("카테고리 데이터를 불러오지 못했습니다:", error);
+    return DEFAULT_CATEGORIES;
+  }
+}
+
+function saveCategories(categories) {
+  try {
+    localStorage.setItem(CATEGORIES_STORAGE_KEY, JSON.stringify(categories));
+  } catch (error) {
+    console.error("카테고리 데이터를 저장하지 못했습니다:", error);
+  }
+}
+
+// 이름으로 카테고리를 찾는다. 삭제 등으로 못 찾으면 "미분류"로, 그마저 없으면 첫 번째 카테고리로 대체한다.
+function findCategoryByName(categories, name) {
+  return (
+    categories.find((c) => c.name === name) ||
+    categories.find((c) => c.id === "cat-default") ||
+    categories[0]
+  );
+}
+
+function hexToRgb(hex) {
+  const normalized = hex.replace("#", "");
+  const value = parseInt(normalized, 16);
+  return { r: (value >> 16) & 255, g: (value >> 8) & 255, b: value & 255 };
+}
+
+// 배경색(hex)에 대비되는 텍스트 색상을 밝기 기준으로 판단한다.
+function getReadableTextColor(hex) {
+  const { r, g, b } = hexToRgb(hex);
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return luminance > 0.6 ? "#222" : "#fff";
+}
+
+// ===== 카테고리 설정 모달 =====
+function generateCategoryId() {
+  return `cat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+let editingCategoryId = null;
+
+function openCategoryModal() {
+  editingCategoryId = null;
+  renderCategoryList();
+  renderCategoryAddForm();
+  document.getElementById("category-modal-overlay").classList.remove("hidden");
+}
+
+function closeCategoryModal() {
+  document.getElementById("category-modal-overlay").classList.add("hidden");
+}
+
+// 카테고리 추가/수정/삭제 후 모달 내부 UI와 할 일 폼/필터/목록/캘린더를 한 번에 재렌더링
+function syncCategoryViews() {
+  renderCategoryList();
+  renderCategoryAddForm();
+  renderCalendar();
+  renderDetail();
+}
+
+function buildCategoryListItemHtml(category, isEditing) {
+  const isDefault = category.id === "cat-default";
+
+  if (isEditing) {
+    const colorCirclesHtml = CATEGORY_PALETTE.map(
+      (color) =>
+        `<button type="button" class="color-circle ${color === category.color ? "selected" : ""}" data-color="${color}" style="background-color: ${color};" aria-label="색상 선택"></button>`
+    ).join("");
+
+    return `
+      <li class="category-list-item category-list-item-editing" data-id="${category.id}">
+        <form class="category-edit-form" data-id="${category.id}">
+          <label>
+            이름
+            <input type="text" class="category-edit-name-input" value="${escapeHtml(category.name)}" />
+          </label>
+          <label>
+            색상
+            <div class="color-circle-list">${colorCirclesHtml}</div>
+          </label>
+          <p class="form-error category-edit-error"></p>
+          <div class="form-actions">
+            <button type="button" class="secondary-btn cancel-edit-category-btn" data-id="${category.id}">취소</button>
+            <button type="submit" class="primary-btn">저장</button>
+          </div>
+        </form>
+      </li>
+    `;
+  }
+
+  return `
+    <li class="category-list-item" data-id="${category.id}">
+      <span class="category-color-chip" style="background-color: ${category.color};"></span>
+      <span class="category-name">${escapeHtml(category.name)}</span>
+      <div class="category-item-actions">
+        <button class="edit-category-btn secondary-btn" type="button" data-id="${category.id}">수정</button>
+        <button class="delete-category-btn secondary-btn" type="button" data-id="${category.id}" ${isDefault ? "disabled" : ""}>삭제</button>
+      </div>
+    </li>
+  `;
+}
+
+function getSortedCategories() {
+  const categories = getCategories();
+  return [...categories].sort((a, b) => {
+    if (a.id === "cat-default") return -1;
+    if (b.id === "cat-default") return 1;
+    return a.name.localeCompare(b.name, "ko");
+  });
+}
+
+function renderCategoryList() {
+  const container = document.getElementById("category-list");
+  const categories = getSortedCategories();
+  container.innerHTML = categories.length
+    ? `<ul class="category-list">${categories
+        .map((category) => buildCategoryListItemHtml(category, category.id === editingCategoryId))
+        .join("")}</ul>`
+    : '<p class="empty-message">등록된 카테고리가 없습니다.</p>';
+
+  attachCategoryListEvents();
+}
+
+function attachCategoryListEvents() {
+  document.querySelectorAll(".edit-category-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      editingCategoryId = btn.dataset.id;
+      renderCategoryList();
+    });
+  });
+
+  document.querySelectorAll(".cancel-edit-category-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      editingCategoryId = null;
+      renderCategoryList();
+    });
+  });
+
+  document.querySelectorAll(".delete-category-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      deleteCategory(btn.dataset.id);
+    });
+  });
+
+  document.querySelectorAll(".category-edit-form").forEach((form) => {
+    form.querySelectorAll(".color-circle").forEach((circle) => {
+      circle.addEventListener("click", () => {
+        form.querySelectorAll(".color-circle").forEach((c) => c.classList.remove("selected"));
+        circle.classList.add("selected");
+      });
+    });
+
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      handleCategoryEditSubmit(form);
+    });
+  });
+}
+
+function handleCategoryEditSubmit(form) {
+  const id = form.dataset.id;
+  const nameInput = form.querySelector(".category-edit-name-input");
+  const errorEl = form.querySelector(".category-edit-error");
+  const selectedCircle = form.querySelector(".color-circle.selected");
+  const newName = nameInput.value.trim();
+  const newColor = selectedCircle ? selectedCircle.dataset.color : CATEGORY_PALETTE[0];
+
+  errorEl.textContent = "";
+
+  if (!newName) {
+    errorEl.textContent = "이름을 입력해주세요.";
+    return;
+  }
+
+  const categories = getCategories();
+  const target = categories.find((c) => c.id === id);
+  if (!target) {
+    return;
+  }
+
+  const isDuplicate = categories.some((c) => c.id !== id && c.name === newName);
+  if (isDuplicate) {
+    errorEl.textContent = "이미 존재하는 카테고리 이름입니다.";
+    return;
+  }
+
+  const oldName = target.name;
+  target.name = newName;
+  target.color = newColor;
+  saveCategories(categories);
+
+  if (oldName !== newName) {
+    state.todos.forEach((todo) => {
+      if (todo.category === oldName) {
+        todo.category = newName;
+      }
+    });
+    saveTodos();
+
+    if (state.categoryFilter === oldName) {
+      state.categoryFilter = newName;
+    }
+  }
+
+  editingCategoryId = null;
+  syncCategoryViews();
+}
+
+function deleteCategory(id) {
+  if (id === "cat-default") {
+    return;
+  }
+
+  const categories = getCategories();
+  const target = categories.find((c) => c.id === id);
+  if (!target) {
+    return;
+  }
+
+  const confirmed = confirm("이 카테고리를 사용하는 할 일은 '미분류'로 이동됩니다. 삭제하시겠습니까?");
+  if (!confirmed) {
+    return;
+  }
+
+  const defaultCategory = categories.find((c) => c.id === "cat-default");
+  const fallbackName = defaultCategory ? defaultCategory.name : "미분류";
+
+  const remaining = categories.filter((c) => c.id !== id);
+  saveCategories(remaining);
+
+  let todosChanged = false;
+  state.todos.forEach((todo) => {
+    if (todo.category === target.name) {
+      todo.category = fallbackName;
+      todosChanged = true;
+    }
+  });
+  if (todosChanged) {
+    saveTodos();
+  }
+
+  if (state.categoryFilter === target.name) {
+    state.categoryFilter = "전체";
+  }
+
+  if (editingCategoryId === id) {
+    editingCategoryId = null;
+  }
+  syncCategoryViews();
+}
+
+const MAX_CATEGORY_COUNT = CATEGORY_PALETTE.length;
+
+function renderCategoryAddForm() {
+  const container = document.getElementById("category-add-form");
+
+  if (getCategories().length >= MAX_CATEGORY_COUNT) {
+    container.innerHTML = `<p class="form-error">카테고리는 최대 ${MAX_CATEGORY_COUNT}개까지 만들 수 있습니다.</p>`;
+    return;
+  }
+
+  const colorCirclesHtml = CATEGORY_PALETTE.map(
+    (color, index) =>
+      `<button type="button" class="color-circle ${index === 0 ? "selected" : ""}" data-color="${color}" style="background-color: ${color};" aria-label="색상 선택"></button>`
+  ).join("");
+
+  container.innerHTML = `
+    <form id="category-add-form-el" class="category-add-form">
+      <label>
+        이름
+        <input type="text" name="name" id="category-name-input" placeholder="새 카테고리 이름" />
+      </label>
+      <div class="color-circle-list">${colorCirclesHtml}</div>
+      <p id="category-add-error" class="form-error"></p>
+      <div class="form-actions">
+        <button type="submit" class="primary-btn">추가하기</button>
+      </div>
+    </form>
+  `;
+
+  let selectedColor = CATEGORY_PALETTE[0];
+
+  container.querySelectorAll(".color-circle").forEach((circle) => {
+    circle.addEventListener("click", () => {
+      selectedColor = circle.dataset.color;
+      container.querySelectorAll(".color-circle").forEach((c) => c.classList.remove("selected"));
+      circle.classList.add("selected");
+    });
+  });
+
+  document.getElementById("category-add-form-el").addEventListener("submit", (event) => {
+    event.preventDefault();
+
+    const nameInput = document.getElementById("category-name-input");
+    const errorEl = document.getElementById("category-add-error");
+    const name = nameInput.value.trim();
+
+    errorEl.textContent = "";
+
+    const categories = getCategories();
+
+    if (categories.length >= MAX_CATEGORY_COUNT) {
+      errorEl.textContent = `카테고리는 최대 ${MAX_CATEGORY_COUNT}개까지 만들 수 있습니다.`;
+      renderCategoryAddForm();
+      return;
+    }
+
+    if (!name) {
+      errorEl.textContent = "이름을 입력해주세요.";
+      return;
+    }
+
+    if (categories.some((c) => c.name === name)) {
+      errorEl.textContent = "이미 존재하는 카테고리 이름입니다.";
+      return;
+    }
+
+    categories.push({ id: generateCategoryId(), name, color: selectedColor });
+    saveCategories(categories);
+
+    syncCategoryViews();
+  });
 }
 
 // ===== 유틸 =====
@@ -120,6 +473,8 @@ function renderCalendar() {
     }
   }
 
+  const sortedCategories = getSortedCategories();
+
   cells.forEach(({ day, year, month, otherMonth }) => {
     const dateStr = formatDateStr(year, month, day);
     const cellEl = document.createElement("div");
@@ -136,11 +491,12 @@ function renderCalendar() {
       cellEl.classList.add("selected");
     }
 
-    const categoriesForDate = CATEGORIES.filter((cat) =>
-      state.todos.some((t) => t.date === dateStr && t.category === cat)
+    const categoryNamesForDate = new Set(
+      state.todos.filter((t) => t.date === dateStr).map((t) => t.category)
     );
-    const dotsHtml = categoriesForDate
-      .map((cat) => `<span class="day-dot category-${categorySlug(cat)}"></span>`)
+    const dotsHtml = sortedCategories
+      .filter((c) => categoryNamesForDate.has(c.name))
+      .map((c) => `<span class="day-dot" style="background-color: ${c.color};"></span>`)
       .join("");
 
     cellEl.innerHTML = `
@@ -155,14 +511,16 @@ function renderCalendar() {
 }
 
 // ===== 상세 영역 렌더링 =====
-function buildFormHtml(editingTodo) {
+function buildFormHtml(editingTodo, categories) {
   const isEdit = editingTodo !== null;
   const titleValue = isEdit ? escapeHtml(editingTodo.title) : "";
   const memoValue = isEdit ? escapeHtml(editingTodo.memo) : "";
-  const optionsHtml = CATEGORIES.map((cat) => {
-    const selected = isEdit && editingTodo.category === cat ? "selected" : "";
-    return `<option value="${cat}" ${selected}>${cat}</option>`;
-  }).join("");
+  const optionsHtml = categories
+    .map((cat) => {
+      const selected = isEdit && editingTodo.category === cat.name ? "selected" : "";
+      return `<option value="${escapeHtml(cat.name)}" ${selected}>${escapeHtml(cat.name)}</option>`;
+    })
+    .join("");
 
   return `
     <form id="todo-form" class="todo-form">
@@ -186,16 +544,17 @@ function buildFormHtml(editingTodo) {
   `;
 }
 
-function buildTodoItemHtml(todo) {
-  const slug = categorySlug(todo.category);
+function buildTodoItemHtml(todo, categories) {
+  const category = findCategoryByName(categories, todo.category);
+  const textColor = getReadableTextColor(category.color);
   return `
-    <li class="todo-item category-${slug} ${todo.completed ? "completed" : ""}" data-id="${todo.id}">
+    <li class="todo-item ${todo.completed ? "completed" : ""}" data-id="${todo.id}" style="border-left-color: ${category.color};">
       <label class="todo-check">
         <input type="checkbox" class="todo-complete-checkbox" data-id="${todo.id}" ${todo.completed ? "checked" : ""} />
       </label>
       <div class="todo-main">
         <div class="todo-title-row">
-          <span class="todo-category-badge category-${slug}">${escapeHtml(todo.category)}</span>
+          <span class="todo-category-badge" style="background-color: ${category.color}; color: ${textColor};">${escapeHtml(todo.category)}</span>
           <span class="todo-title">${escapeHtml(todo.title)}</span>
         </div>
         ${todo.memo ? `<p class="todo-memo">${escapeHtml(todo.memo)}</p>` : ""}
@@ -208,14 +567,14 @@ function buildTodoItemHtml(todo) {
   `;
 }
 
-function buildCategoryFilterHtml() {
-  const options = ["전체", ...CATEGORIES];
+function buildCategoryFilterHtml(categories) {
+  const options = ["전체", ...categories.map((c) => c.name)];
   return `
     <div class="category-filter">
       ${options
         .map(
           (opt) =>
-            `<button type="button" class="filter-btn ${state.categoryFilter === opt ? "active" : ""}" data-filter="${opt}">${opt}</button>`
+            `<button type="button" class="filter-btn ${state.categoryFilter === opt ? "active" : ""}" data-filter="${escapeHtml(opt)}">${escapeHtml(opt)}</button>`
         )
         .join("")}
     </div>
@@ -224,6 +583,7 @@ function buildCategoryFilterHtml() {
 
 function renderDetail() {
   const container = document.getElementById("detail-content");
+  const categories = getSortedCategories();
 
   const [y, m, d] = state.selectedDate.split("-").map(Number);
   const dateObj = new Date(y, m - 1, d);
@@ -239,22 +599,25 @@ function renderDetail() {
   const { mode, editingId } = state.detailForm;
   let formHtml = "";
   if (mode === "add") {
-    formHtml = buildFormHtml(null);
+    formHtml = buildFormHtml(null, categories);
   } else if (mode === "edit") {
     const editingTodo = state.todos.find((t) => t.id === editingId) || null;
-    formHtml = buildFormHtml(editingTodo);
+    formHtml = buildFormHtml(editingTodo, categories);
   }
 
   const listHtml = todosForDate.length
-    ? todosForDate.map(buildTodoItemHtml).join("")
+    ? todosForDate.map((todo) => buildTodoItemHtml(todo, categories)).join("")
     : '<p class="empty-message">등록된 할 일이 없습니다.</p>';
 
   container.innerHTML = `
     <div class="detail-header">
       <h2>${dateLabel}</h2>
-      ${mode === null ? '<button id="add-todo-btn" class="primary-btn" type="button">+ 할 일 추가</button>' : ""}
+      <div class="detail-header-actions">
+        ${mode === null ? '<button id="add-todo-btn" class="primary-btn" type="button">+ 할 일 추가</button>' : ""}
+        <button id="category-settings-btn" class="secondary-btn" type="button">카테고리 설정</button>
+      </div>
     </div>
-    ${buildCategoryFilterHtml()}
+    ${buildCategoryFilterHtml(categories)}
     ${formHtml}
     <ul class="todo-list">${listHtml}</ul>
   `;
@@ -276,6 +639,11 @@ function attachDetailEvents() {
       state.detailForm = { mode: "add", editingId: null };
       renderDetail();
     });
+  }
+
+  const categorySettingsBtn = document.getElementById("category-settings-btn");
+  if (categorySettingsBtn) {
+    categorySettingsBtn.addEventListener("click", openCategoryModal);
   }
 
   const form = document.getElementById("todo-form");
@@ -396,6 +764,16 @@ function goToNextMonth() {
 document.getElementById("prev-month-btn").addEventListener("click", goToPrevMonth);
 document.getElementById("next-month-btn").addEventListener("click", goToNextMonth);
 
+const categoryModalOverlay = document.getElementById("category-modal-overlay");
+categoryModalOverlay.addEventListener("click", (event) => {
+  if (event.target === categoryModalOverlay) {
+    closeCategoryModal();
+  }
+});
+document.getElementById("category-modal-close-btn").addEventListener("click", closeCategoryModal);
+
 renderWeekdayHeader();
 renderCalendar();
 renderDetail();
+
+console.log("카테고리 목록:", getCategories());
