@@ -92,6 +92,16 @@ body {
 }
 
 .calendar-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.calendar-week {
+  position: relative;
+}
+
+.calendar-week-days {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
   gap: 4px;
@@ -102,18 +112,26 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 3px;
+  padding-top: 6px;
   border-radius: 8px;
   font-size: 14px;
   cursor: pointer;
   color: #333;
+  position: relative;
+}
+
+.calendar-day:hover {
+  background-color: #f0f0f0;
 }
 
 .day-dots {
+  position: absolute;
+  bottom: 6px;
+  left: 0;
+  right: 0;
   display: flex;
-  gap: 2px;
-  height: 5px;
+  justify-content: center;
+  gap: 3px;
 }
 
 .day-dot {
@@ -122,8 +140,53 @@ body {
   border-radius: 50%;
 }
 
-.calendar-day:hover {
-  background-color: #f0f0f0;
+/* 연속된 예약(여러 날짜에 걸친 할 일) 막대: 날짜 칸 그리드 위에 겹쳐서 표시한다 */
+.calendar-week-bars {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  grid-auto-rows: 16px;
+  gap: 2px 4px;
+  padding-top: 28px;
+  pointer-events: none;
+}
+
+.calendar-bar {
+  grid-row: span 1;
+  font-size: 10px;
+  line-height: 16px;
+  padding: 0 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  pointer-events: auto;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+.calendar-bar.bar-round-left {
+  border-top-left-radius: 4px;
+  border-bottom-left-radius: 4px;
+  margin-left: 1px;
+}
+
+.calendar-bar.bar-round-right {
+  border-top-right-radius: 4px;
+  border-bottom-right-radius: 4px;
+  margin-right: 1px;
+}
+
+.calendar-bar.bar-completed {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+
+.calendar-bar-more {
+  grid-column: 1 / -1;
+  font-size: 10px;
+  color: #888;
+  padding-left: 4px;
 }
 
 .calendar-day.other-month {
@@ -230,6 +293,8 @@ body {
 }
 
 .todo-form input[type="text"],
+.todo-form input[type="date"],
+.todo-form input[type="time"],
 .todo-form select,
 .todo-form textarea {
   font-size: 14px;
@@ -242,6 +307,27 @@ body {
 .todo-form textarea {
   resize: vertical;
   min-height: 60px;
+}
+
+.date-range-fields,
+.time-range-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.date-range-fields label,
+.time-range-fields label {
+  flex: 1 1 120px;
+}
+
+.time-range-fields .form-hint {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 400;
+  color: #888;
 }
 
 .form-actions {
@@ -298,6 +384,13 @@ body {
   padding: 2px 8px;
   border-radius: 999px;
   font-weight: 600;
+}
+
+.todo-time-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: #888;
+  white-space: nowrap;
 }
 
 .todo-title {

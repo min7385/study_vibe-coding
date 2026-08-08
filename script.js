@@ -6,7 +6,7 @@ const state = {
   viewYear: today.getFullYear(),
   viewMonth: today.getMonth(), // 0~11
   selectedDate: formatDateStr(today.getFullYear(), today.getMonth(), today.getDate()),
-  todos: loadTodos(), // { id, title, category, date, memo, completed, createdAt }
+  todos: loadTodos(), // { id, title, category, startDate, endDate, startTime, endTime, memo, completed, createdAt }
   detailForm: { mode: null, editingId: null }, // mode: null | "add" | "edit"
   categoryFilter: "전체", // "전체" | 카테고리 이름 중 하나
 };
@@ -387,6 +387,24 @@ function isSameDate(y1, m1, d1, dateStr) {
   return formatDateStr(y1, m1, d1) === dateStr;
 }
 
+// dateStr("YYYY-MM-DD")이 startDate~endDate 범위(양 끝 포함)에 속하는지 확인한다.
+function isDateInRange(dateStr, startDate, endDate) {
+  return dateStr >= startDate && dateStr <= endDate;
+}
+
+function maxDateStr(a, b) {
+  return a > b ? a : b;
+}
+
+function minDateStr(a, b) {
+  return a < b ? a : b;
+}
+
+// "YYYY-MM-DD" 문자열 두 개 사이의 일수 차이(to - from)를 구한다.
+function daysBetween(fromDateStr, toDateStr) {
+  return Math.round((new Date(toDateStr) - new Date(fromDateStr)) / 86400000);
+}
+
 function generateId() {
   return `todo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -398,6 +416,49 @@ function escapeHtml(str) {
 }
 
 // ===== localStorage 연동 =====
+// 기존 date 단일 필드 구조를 startDate/endDate/startTime/endTime 구조로 변환한다.
+// 이미 startDate가 있는 항목은 변환 대상이 아니므로 그대로 반환한다(중복 변환 방지).
+function migrateTodo(todo) {
+  if (todo.startDate) {
+    return { todo, changed: false };
+  }
+
+  const { date, ...rest } = todo;
+  return {
+    todo: {
+      ...rest,
+      startDate: date,
+      endDate: date,
+      startTime: null,
+      endTime: null,
+    },
+    changed: true,
+  };
+}
+
+function migrateTodos(rawTodos) {
+  let migratedCount = 0;
+
+  const migrated = rawTodos.map((todo) => {
+    const result = migrateTodo(todo);
+    if (result.changed) {
+      migratedCount += 1;
+    }
+    return result.todo;
+  });
+
+  if (migratedCount > 0) {
+    console.log(
+      `[마이그레이션] date 필드만 있던 할 일 ${migratedCount}건을 startDate/endDate/startTime/endTime 구조로 변환했습니다.`,
+      migrated
+    );
+  } else {
+    console.log("[마이그레이션] 변환이 필요한 데이터가 없습니다. 기존 구조를 그대로 사용합니다.");
+  }
+
+  return { migrated, changed: migratedCount > 0 };
+}
+
 function loadTodos() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -405,7 +466,17 @@ function loadTodos() {
       return [];
     }
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    const { migrated, changed } = migrateTodos(parsed);
+    if (changed) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
+      console.log("[마이그레이션] 변환된 데이터를 localStorage에 다시 저장했습니다.");
+    }
+
+    return migrated;
   } catch (error) {
     console.error("할 일 데이터를 불러오지 못했습니다:", error);
     return [];
@@ -424,6 +495,34 @@ function saveTodos() {
 function renderWeekdayHeader() {
   const container = document.getElementById("calendar-weekdays");
   container.innerHTML = WEEKDAY_LABELS.map((label) => `<span>${label}</span>`).join("");
+}
+
+const MAX_VISIBLE_LANES = 3;
+
+// 기간이 겹치는 할 일(여러 날짜에 걸친 연속 예약)끼리는 서로 다른 레인(세로 위치)에 배치되도록
+// 그리디 구간 채색을 수행한다. 캘린더에 표시되는 모든 주에 걸쳐 동일한 할 일은 항상 같은 레인을
+// 사용해 막대가 자연스럽게 이어져 보인다.
+function assignTodoLanes(todos, rangeStart, rangeEnd) {
+  const laneLastEndDates = [];
+  const todoLanes = new Map();
+
+  const sorted = [...todos].sort(
+    (a, b) => a.startDate.localeCompare(b.startDate) || a.id.localeCompare(b.id)
+  );
+
+  sorted.forEach((todo) => {
+    const clippedStart = maxDateStr(todo.startDate, rangeStart);
+    const clippedEnd = minDateStr(todo.endDate, rangeEnd);
+
+    let lane = laneLastEndDates.findIndex((lastEnd) => lastEnd < clippedStart);
+    if (lane === -1) {
+      lane = laneLastEndDates.length;
+    }
+    laneLastEndDates[lane] = clippedEnd;
+    todoLanes.set(todo.id, lane);
+  });
+
+  return todoLanes;
 }
 
 function renderCalendar() {
@@ -473,48 +572,158 @@ function renderCalendar() {
     }
   }
 
-  const sortedCategories = getSortedCategories();
+  const categories = getSortedCategories();
+  const cellsWithDate = cells.map((cell) => ({
+    ...cell,
+    dateStr: formatDateStr(cell.year, cell.month, cell.day),
+  }));
 
-  cells.forEach(({ day, year, month, otherMonth }) => {
-    const dateStr = formatDateStr(year, month, day);
-    const cellEl = document.createElement("div");
-    cellEl.className = "calendar-day";
-    cellEl.dataset.date = dateStr;
+  const rangeStart = cellsWithDate[0].dateStr;
+  const rangeEnd = cellsWithDate[cellsWithDate.length - 1].dateStr;
 
-    if (otherMonth) {
-      cellEl.classList.add("other-month");
-    }
-    if (isSameDate(today.getFullYear(), today.getMonth(), today.getDate(), dateStr)) {
-      cellEl.classList.add("today");
-    }
-    if (dateStr === state.selectedDate) {
-      cellEl.classList.add("selected");
-    }
+  // 캘린더에 표시된 기간과 겹치는 할 일만 렌더링 대상으로 삼는다.
+  const todosInRange = state.todos.filter(
+    (t) => t.endDate >= rangeStart && t.startDate <= rangeEnd
+  );
+  // 여러 날짜에 걸친 연속 예약만 막대로 표시하고, 레인도 이들끼리만 계산한다.
+  const continuousTodosInRange = todosInRange.filter((t) => t.startDate !== t.endDate);
+  const todoLanes = assignTodoLanes(continuousTodosInRange, rangeStart, rangeEnd);
 
-    const categoryNamesForDate = new Set(
-      state.todos.filter((t) => t.date === dateStr).map((t) => t.category)
-    );
-    const dotsHtml = sortedCategories
-      .filter((c) => categoryNamesForDate.has(c.name))
-      .map((c) => `<span class="day-dot" style="background-color: ${c.color};"></span>`)
-      .join("");
+  for (let row = 0; row * 7 < cellsWithDate.length; row += 1) {
+    const weekCells = cellsWithDate.slice(row * 7, row * 7 + 7);
+    const weekEl = document.createElement("div");
+    weekEl.className = "calendar-week";
+    weekEl.innerHTML = buildWeekHtml(weekCells, todosInRange, todoLanes, categories);
+    grid.appendChild(weekEl);
 
-    cellEl.innerHTML = `
-      <span class="day-number">${day}</span>
-      <span class="day-dots">${dotsHtml}</span>
-    `;
+    weekCells.forEach(({ dateStr }) => {
+      const dayEl = weekEl.querySelector(`.calendar-day[data-date="${dateStr}"]`);
+      dayEl.addEventListener("click", () => onDateClick(dateStr));
+    });
 
-    cellEl.addEventListener("click", () => onDateClick(dateStr));
+    weekEl.querySelectorAll(".calendar-bar").forEach((barEl) => {
+      barEl.addEventListener("click", (event) => {
+        event.stopPropagation();
+        onBarClick(barEl.dataset.id);
+      });
+    });
+  }
+}
 
-    grid.appendChild(cellEl);
-  });
+function buildWeekHtml(weekCells, todosInRange, todoLanes, categories) {
+  const rowStart = weekCells[0].dateStr;
+  const rowEnd = weekCells[weekCells.length - 1].dateStr;
+
+  const daysHtml = weekCells
+    .map(({ day, dateStr, otherMonth }) => {
+      const classes = ["calendar-day"];
+      if (otherMonth) classes.push("other-month");
+      if (isSameDate(today.getFullYear(), today.getMonth(), today.getDate(), dateStr)) {
+        classes.push("today");
+      }
+      if (dateStr === state.selectedDate) classes.push("selected");
+
+      // 연속된 예약(여러 날짜에 걸친 할 일)이 아닌 하루짜리 일정은 막대 대신 점으로 표시한다.
+      const categoryNamesForDate = new Set(
+        todosInRange
+          .filter((t) => t.startDate === t.endDate && t.startDate === dateStr)
+          .map((t) => t.category)
+      );
+      const dotsHtml = categories
+        .filter((c) => categoryNamesForDate.has(c.name))
+        .map((c) => `<span class="day-dot" style="background-color: ${c.color};"></span>`)
+        .join("");
+
+      return `
+        <div class="${classes.join(" ")}" data-date="${dateStr}">
+          <span class="day-number">${day}</span>
+          <span class="day-dots">${dotsHtml}</span>
+        </div>
+      `;
+    })
+    .join("");
+
+  // 레인이 배정된, 즉 여러 날짜에 걸친 연속 예약만 막대로 그린다.
+  const continuousTodos = todosInRange.filter((todo) => todoLanes.has(todo.id));
+
+  const segments = continuousTodos
+    .map((todo) => {
+      const segStart = maxDateStr(todo.startDate, rowStart);
+      const segEnd = minDateStr(todo.endDate, rowEnd);
+      if (segStart > segEnd) {
+        return null;
+      }
+      return {
+        todo,
+        lane: todoLanes.get(todo.id),
+        colStart: daysBetween(rowStart, segStart),
+        colEnd: daysBetween(rowStart, segEnd),
+        continuesLeft: todo.startDate < segStart,
+        continuesRight: todo.endDate > segEnd,
+      };
+    })
+    .filter(Boolean);
+
+  const visibleSegments = segments.filter((s) => s.lane < MAX_VISIBLE_LANES);
+  const hiddenCount = segments.length - visibleSegments.length;
+
+  const barsHtml = visibleSegments
+    .map((seg) => {
+      const category = findCategoryByName(categories, seg.todo.category);
+      const textColor = getReadableTextColor(category.color);
+      const roundClasses = [
+        !seg.continuesLeft ? "bar-round-left" : "",
+        !seg.continuesRight ? "bar-round-right" : "",
+        seg.todo.completed ? "bar-completed" : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+
+      return `
+        <div
+          class="calendar-bar ${roundClasses}"
+          data-id="${seg.todo.id}"
+          title="${escapeHtml(seg.todo.title)}"
+          style="grid-column: ${seg.colStart + 1} / ${seg.colEnd + 2}; grid-row: ${seg.lane + 1}; background-color: ${category.color}; color: ${textColor};"
+        >${escapeHtml(seg.todo.title)}</div>
+      `;
+    })
+    .join("");
+
+  const moreHtml =
+    hiddenCount > 0
+      ? `<div class="calendar-bar-more" style="grid-row: ${MAX_VISIBLE_LANES + 1};">+${hiddenCount}개 더보기</div>`
+      : "";
+
+  const barsAreaHtml =
+    barsHtml || moreHtml ? `<div class="calendar-week-bars">${barsHtml}${moreHtml}</div>` : "";
+
+  return `
+    <div class="calendar-week-days">${daysHtml}</div>
+    ${barsAreaHtml}
+  `;
+}
+
+function onBarClick(todoId) {
+  const todo = state.todos.find((t) => t.id === todoId);
+  if (!todo) {
+    return;
+  }
+  state.selectedDate = todo.startDate;
+  state.detailForm = { mode: "edit", editingId: todo.id };
+  renderCalendar();
+  renderDetail();
 }
 
 // ===== 상세 영역 렌더링 =====
-function buildFormHtml(editingTodo, categories) {
+function buildFormHtml(editingTodo, categories, defaultDate) {
   const isEdit = editingTodo !== null;
   const titleValue = isEdit ? escapeHtml(editingTodo.title) : "";
   const memoValue = isEdit ? escapeHtml(editingTodo.memo) : "";
+  const startDateValue = isEdit ? editingTodo.startDate : defaultDate;
+  const endDateValue = isEdit ? editingTodo.endDate : defaultDate;
+  const startTimeValue = isEdit && editingTodo.startTime ? editingTodo.startTime : "";
+  const endTimeValue = isEdit && editingTodo.endTime ? editingTodo.endTime : "";
   const optionsHtml = categories
     .map((cat) => {
       const selected = isEdit && editingTodo.category === cat.name ? "selected" : "";
@@ -532,10 +741,32 @@ function buildFormHtml(editingTodo, categories) {
         카테고리
         <select name="category">${optionsHtml}</select>
       </label>
+      <div class="date-range-fields">
+        <label>
+          시작일
+          <input type="date" name="startDate" value="${startDateValue}" required />
+        </label>
+        <label>
+          종료일
+          <input type="date" name="endDate" value="${endDateValue}" required />
+        </label>
+      </div>
+      <div class="time-range-fields">
+        <label>
+          시작 시간
+          <input type="time" name="startTime" value="${startTimeValue}" />
+        </label>
+        <label>
+          종료 시간
+          <input type="time" name="endTime" value="${endTimeValue}" />
+        </label>
+        <p class="form-hint">시간을 비워두면 종일 일정으로 등록됩니다.</p>
+      </div>
       <label>
         메모
         <textarea name="memo">${memoValue}</textarea>
       </label>
+      <p class="form-error todo-form-error"></p>
       <div class="form-actions">
         <button type="button" id="cancel-form-btn" class="secondary-btn">취소</button>
         <button type="submit" class="primary-btn">저장</button>
@@ -544,9 +775,52 @@ function buildFormHtml(editingTodo, categories) {
   `;
 }
 
-function buildTodoItemHtml(todo, categories) {
+// 종료일이 시작일보다 빠르거나, 같은 날짜에서 종료 시간이 시작 시간보다 빠르면 오류 메시지를 반환한다.
+function validateTodoFormDates({ startDate, endDate, startTime, endTime }) {
+  if (endDate < startDate) {
+    return "종료일은 시작일보다 빠를 수 없습니다";
+  }
+
+  if (startTime && endTime && startDate === endDate && endTime < startTime) {
+    return "종료 시간은 시작 시간보다 빠를 수 없습니다";
+  }
+
+  return null;
+}
+
+// 시간이 있으면 "14:00" 형태의 시작 시간을, 없으면 "종일"을 반환한다.
+function getTodoTimeLabel(todo) {
+  return todo.startTime || "종일";
+}
+
+// 여러 날에 걸친 할 일이면 "(3일차/5일)" 형태의 진행 표시를, 하루짜리면 빈 문자열을 반환한다.
+function getTodoDayProgressLabel(todo, selectedDate) {
+  if (todo.startDate === todo.endDate) {
+    return "";
+  }
+  const totalDays = daysBetween(todo.startDate, todo.endDate) + 1;
+  const currentDay = daysBetween(todo.startDate, selectedDate) + 1;
+  return ` (${currentDay}일차/${totalDays}일)`;
+}
+
+// 상세 목록 정렬: 종일 일정을 먼저, 그 다음 시간이 있는 일정을 시작 시간 순으로 배치한다.
+function sortTodosByTime(todos) {
+  return [...todos].sort((a, b) => {
+    if (!a.startTime !== !b.startTime) {
+      return a.startTime ? 1 : -1;
+    }
+    if (a.startTime && b.startTime) {
+      return a.startTime.localeCompare(b.startTime);
+    }
+    return 0;
+  });
+}
+
+function buildTodoItemHtml(todo, categories, selectedDate) {
   const category = findCategoryByName(categories, todo.category);
   const textColor = getReadableTextColor(category.color);
+  const timeLabel = getTodoTimeLabel(todo);
+  const dayProgressLabel = getTodoDayProgressLabel(todo, selectedDate);
   return `
     <li class="todo-item ${todo.completed ? "completed" : ""}" data-id="${todo.id}" style="border-left-color: ${category.color};">
       <label class="todo-check">
@@ -555,7 +829,8 @@ function buildTodoItemHtml(todo, categories) {
       <div class="todo-main">
         <div class="todo-title-row">
           <span class="todo-category-badge" style="background-color: ${category.color}; color: ${textColor};">${escapeHtml(todo.category)}</span>
-          <span class="todo-title">${escapeHtml(todo.title)}</span>
+          <span class="todo-time-badge">${timeLabel}</span>
+          <span class="todo-title">${escapeHtml(todo.title)}${dayProgressLabel}</span>
         </div>
         ${todo.memo ? `<p class="todo-memo">${escapeHtml(todo.memo)}</p>` : ""}
       </div>
@@ -590,23 +865,25 @@ function renderDetail() {
   const weekdayLabel = `${WEEKDAY_LABELS[dateObj.getDay()]}요일`;
   const dateLabel = `${y}년 ${m}월 ${d}일 ${weekdayLabel}`;
 
-  const todosForDate = state.todos.filter(
-    (t) =>
-      t.date === state.selectedDate &&
-      (state.categoryFilter === "전체" || t.category === state.categoryFilter)
+  const todosForDate = sortTodosByTime(
+    state.todos.filter(
+      (t) =>
+        isDateInRange(state.selectedDate, t.startDate, t.endDate) &&
+        (state.categoryFilter === "전체" || t.category === state.categoryFilter)
+    )
   );
 
   const { mode, editingId } = state.detailForm;
   let formHtml = "";
   if (mode === "add") {
-    formHtml = buildFormHtml(null, categories);
+    formHtml = buildFormHtml(null, categories, state.selectedDate);
   } else if (mode === "edit") {
     const editingTodo = state.todos.find((t) => t.id === editingId) || null;
-    formHtml = buildFormHtml(editingTodo, categories);
+    formHtml = buildFormHtml(editingTodo, categories, state.selectedDate);
   }
 
   const listHtml = todosForDate.length
-    ? todosForDate.map((todo) => buildTodoItemHtml(todo, categories)).join("")
+    ? todosForDate.map((todo) => buildTodoItemHtml(todo, categories, state.selectedDate)).join("")
     : '<p class="empty-message">등록된 할 일이 없습니다.</p>';
 
   container.innerHTML = `
@@ -682,30 +959,39 @@ function attachDetailEvents() {
 function handleFormSubmit(event) {
   event.preventDefault();
   const form = event.target;
-  const title = form.title.value.trim();
-  const category = form.category.value;
-  const memo = form.memo.value.trim();
+  const formValues = {
+    title: form.title.value.trim(),
+    category: form.category.value,
+    startDate: form.startDate.value,
+    endDate: form.endDate.value,
+    startTime: form.startTime.value || null,
+    endTime: form.endTime.value || null,
+    memo: form.memo.value.trim(),
+  };
+  const errorEl = form.querySelector(".todo-form-error");
 
-  if (!title) {
+  if (!formValues.title) {
     return;
   }
+
+  const errorMessage = validateTodoFormDates(formValues);
+  if (errorMessage) {
+    errorEl.textContent = errorMessage;
+    return;
+  }
+  errorEl.textContent = "";
 
   if (state.detailForm.mode === "add") {
     state.todos.push({
       id: generateId(),
-      title,
-      category,
-      date: state.selectedDate,
-      memo,
+      ...formValues,
       completed: false,
       createdAt: new Date().toISOString(),
     });
   } else if (state.detailForm.mode === "edit") {
     const todo = state.todos.find((t) => t.id === state.detailForm.editingId);
     if (todo) {
-      todo.title = title;
-      todo.category = category;
-      todo.memo = memo;
+      Object.assign(todo, formValues);
     }
   }
 
